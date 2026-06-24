@@ -1,187 +1,160 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
-using UnityEngine.InputSystem.Controls;
 
-namespace SciFiAnimation
+// Controls drone launch, flight, docking, scanning, and emergency behavior.
+[RequireComponent(typeof(Animator))]
+public class DroneController : MonoBehaviour
 {
-    /// <summary>
-    /// Controls drone behavior including deployment, flight, and animations.
-    /// Handles player input for movement, scanning, and emergency operations.
-    /// </summary>
-    [RequireComponent(typeof(Animator))]
-    public sealed class DroneController : MonoBehaviour
+    // Animator-driven gameplay states used by the HUD and input logic.
+    public enum DroneMode
     {
-        [Header("Flight")]
-        [SerializeField] private float moveSpeed = 5f; // Horizontal movement speed (units/second)
-        [SerializeField] private float verticalSpeed = 3f; // Vertical movement speed (units/second)
-        [SerializeField] private float turnSpeed = 110f; // Rotation speed (degrees/second)
-        [SerializeField] private Vector3 flightBounds = new Vector3(10f, 4f, 8f); // Clamp boundaries (X, Y, Z) around dock position
+        Docked,
+        Launching,
+        Flight,
+        Docking,
+        Scanning,
+        Emergency
+    }
 
-        [Header("References")]
-        [SerializeField] private Transform visualRig; // Visual mesh that tilts during flight
-        [SerializeField] private ParticleSystem leftThruster; // Left engine particle effect
-        [SerializeField] private ParticleSystem rightThruster; // Right engine particle effect
-        [SerializeField] private Light scanLight; // Light that activates during scan animation
+    [SerializeField] private float moveSpeed = 5f;
+    [SerializeField] private float verticalSpeed = 3f;
+    [SerializeField] private float turnSpeed = 110f;
+    [SerializeField] private Vector3 flightBounds = new Vector3(10f, 4f, 8f);
+    [SerializeField] private Transform visualRig;
+    [SerializeField] private ParticleSystem leftThruster;
+    [SerializeField] private ParticleSystem rightThruster;
+    [SerializeField] private Light scanLight;
 
-        private Animator animator; // Animation controller
-        private Vector3 dockPosition; // Starting position for returning to dock
-        private bool deployed; // Whether drone is launched or docked
-        private bool emergency; // Emergency mode activation state
+    private Animator animator;
+    private Vector3 dockPosition;
+    private Quaternion dockRotation;
+    private bool deployed;
+    private bool emergency;
 
-        /// <summary>Current animation state (DOCKED, FLIGHT, LAUNCHING, DOCKING, SCANNING, EMERGENCY)</summary>
-        public string CurrentMode { get; private set; } = "DOCKED";
+    public DroneMode CurrentMode { get; private set; } = DroneMode.Docked;
 
-        /// <summary>Initialize animator and store home position</summary>
-        private void Awake()
+    // Cache the animator and the starting dock position and rotation.
+    private void Awake()
+    {
+        animator = GetComponent<Animator>();
+        dockPosition = transform.position;
+        dockRotation = transform.rotation;
+    }
+
+    // Reads player input and routes it to launch, flight, scan, or emergency actions.
+    private void Update()
+    {
+        Keyboard keyboard = Keyboard.current;
+        if (keyboard == null)
         {
-            animator = GetComponent<Animator>();
-            dockPosition = transform.position; // Store starting dock position
+            return;
         }
 
-        /// <summary>Main update loop: process input, update state, handle flight, and visual effects</summary>
-        private void Update()
+        UpdateMode();
+
+        if (keyboard.spaceKey.wasPressedThisFrame && (CurrentMode == DroneMode.Docked || CurrentMode == DroneMode.Flight || CurrentMode == DroneMode.Emergency))
         {
-            Keyboard keyboard = Keyboard.current;
-            if (keyboard == null)
+            if (emergency)
             {
-                return;
+                emergency = false;
+                animator.SetTrigger("Recover");
             }
-
-            HandleStateInput(keyboard); // Process deployment and action inputs
-            UpdateMode(); // Sync current mode from animator state
-
-            // Only allow flight controls when in flight
-            if (CurrentMode == "FLIGHT" && !emergency)
+            else if (deployed)
             {
-                HandleFlight(keyboard);
+                deployed = false;
+                animator.SetTrigger("Dock");
+                transform.SetPositionAndRotation(dockPosition, dockRotation);
             }
-
-            UpdateEffects(); // Update thruster and scan light effects
-        }
-
-        /// <summary>Process deployment, scan, and emergency mode inputs</summary>
-        private void HandleStateInput(Keyboard keyboard)
-        {
-            // SPACE: Toggle deployment and emergency mode
-            if (keyboard.spaceKey.wasPressedThisFrame)
+            else
             {
-                bool canToggleDocking = CurrentMode == "DOCKED" || CurrentMode == "FLIGHT" || CurrentMode == "EMERGENCY";
-                if (!canToggleDocking)
-                {
-                    return; // Prevent toggling during transitions
-                }
-
-                if (emergency)
-                {
-                    // Exit emergency mode
-                    emergency = false;
-                    animator.SetTrigger("Recover");
-                }
-                else if (deployed)
-                {
-                    // Dock the drone
-                    deployed = false;
-                    animator.SetTrigger("Dock");
-                    transform.position = dockPosition; // Return to home
-                    transform.rotation = Quaternion.identity; // Reset rotation
-                }
-                else
-                {
-                    // Launch the drone
-                    deployed = true;
-                    animator.SetTrigger("Launch");
-                }
-            }
-
-            // F: Scan action (only while actively in flight)
-            if (CurrentMode == "FLIGHT" && keyboard.fKey.wasPressedThisFrame)
-            {
-                animator.SetTrigger("Scan");
-            }
-
-            // X: Toggle emergency mode (only when deployed)
-            if (deployed && keyboard.xKey.wasPressedThisFrame)
-            {
-                emergency = !emergency;
-                animator.SetTrigger(emergency ? "Emergency" : "Recover");
+                deployed = true;
+                animator.SetTrigger("Launch");
             }
         }
 
-        /// <summary>Handle drone movement and rotation based on keyboard input</summary>
-        private void HandleFlight(Keyboard keyboard)
+        if (CurrentMode == DroneMode.Flight && keyboard.fKey.wasPressedThisFrame)
         {
-            // Get axis inputs: W/S (forward), A/D (strafe), Q/E (vertical), Arrows (turn)
-            float forward = Axis(keyboard.wKey, keyboard.sKey);
-            float strafe = Axis(keyboard.dKey, keyboard.aKey);
-            float vertical = Axis(keyboard.eKey, keyboard.qKey);
-            float turn = Axis(keyboard.rightArrowKey, keyboard.leftArrowKey);
-
-            // Calculate planar movement relative to drone orientation
-            Vector3 planar = transform.forward * forward + transform.right * strafe;
-            if (planar.sqrMagnitude > 1f)
-            {
-                planar.Normalize(); // Prevent faster diagonal movement
-            }
-
-            // Apply movement forces
-            transform.position += planar * (moveSpeed * Time.deltaTime);
-            transform.position += Vector3.up * (vertical * verticalSpeed * Time.deltaTime);
-            transform.Rotate(Vector3.up, turn * turnSpeed * Time.deltaTime, Space.World);
-
-            // Clamp position within flight bounds relative to dock position
-            Vector3 offset = transform.position - dockPosition;
-            offset.x = Mathf.Clamp(offset.x, -flightBounds.x, flightBounds.x);
-            offset.y = Mathf.Clamp(offset.y, 0f, flightBounds.y);
-            offset.z = Mathf.Clamp(offset.z, -flightBounds.z, flightBounds.z);
-            transform.position = dockPosition + offset;
-
-            // Bank visual rig based on movement direction
-            if (visualRig != null)
-            {
-                Quaternion bank = Quaternion.Euler(forward * 7f, 0f, -strafe * 10f);
-                visualRig.localRotation = Quaternion.Slerp(visualRig.localRotation, bank, Time.deltaTime * 5f);
-            }
+            animator.SetTrigger("Scan");
         }
 
-        /// <summary>Sync CurrentMode property with actual animator state</summary>
-        private void UpdateMode()
+        if (deployed && keyboard.xKey.wasPressedThisFrame)
         {
-            AnimatorStateInfo state = animator.GetCurrentAnimatorStateInfo(0);
-            if (state.IsName("Docked")) CurrentMode = "DOCKED";
-            else if (state.IsName("Launching")) CurrentMode = "LAUNCHING";
-            else if (state.IsName("Docking")) CurrentMode = "DOCKING";
-            else if (state.IsName("Scanning")) CurrentMode = "SCANNING";
-            else if (state.IsName("Emergency")) CurrentMode = "EMERGENCY";
-            else CurrentMode = "FLIGHT"; // Default to flight for all other states
+            emergency = !emergency;
+            animator.SetTrigger(emergency ? "Emergency" : "Recover");
         }
 
-        /// <summary>Update particle effects and lights based on current state</summary>
-        private void UpdateEffects()
+        if (CurrentMode == DroneMode.Flight && !emergency)
         {
-            // Thrusters active only when deployed and not in emergency
-            bool thrustersOn = deployed && !emergency;
-            SetEmission(leftThruster, thrustersOn);
-            SetEmission(rightThruster, thrustersOn);
-
-            // Scan light is controlled by animator during scan animation
-            if (scanLight != null && CurrentMode != "SCANNING")
-            {
-                scanLight.enabled = false;
-            }
+            HandleFlight(keyboard);
         }
 
-        /// <summary>Get axis value from two opposing keys (-1 to 1)</summary>
-        private static float Axis(KeyControl positive, KeyControl negative)
+        UpdateEffects();
+    }
+
+    // Moves and turns the drone while it is in flight.
+    private void HandleFlight(Keyboard keyboard)
+    {
+        float forward = (keyboard.wKey.isPressed ? 1f : 0f) - (keyboard.sKey.isPressed ? 1f : 0f);
+        float strafe = (keyboard.dKey.isPressed ? 1f : 0f) - (keyboard.aKey.isPressed ? 1f : 0f);
+        float vertical = (keyboard.eKey.isPressed ? 1f : 0f) - (keyboard.qKey.isPressed ? 1f : 0f);
+        float turn = (keyboard.rightArrowKey.isPressed ? 1f : 0f) - (keyboard.leftArrowKey.isPressed ? 1f : 0f);
+
+        Vector3 planar = transform.forward * forward + transform.right * strafe;
+        if (planar.sqrMagnitude > 1f)
         {
-            return (positive.isPressed ? 1f : 0f) - (negative.isPressed ? 1f : 0f);
+            planar.Normalize();
         }
 
-        /// <summary>Enable or disable particle emission for a system</summary>
-        private static void SetEmission(ParticleSystem system, bool enabled)
+        transform.position += planar * (moveSpeed * Time.deltaTime);
+        transform.position += Vector3.up * (vertical * verticalSpeed * Time.deltaTime);
+        transform.Rotate(Vector3.up, turn * turnSpeed * Time.deltaTime, Space.World);
+
+        // Keep the drone inside the allowed flight area around the dock.
+        Vector3 offset = transform.position - dockPosition;
+        offset.x = Mathf.Clamp(offset.x, -flightBounds.x, flightBounds.x);
+        offset.y = Mathf.Clamp(offset.y, 0f, flightBounds.y);
+        offset.z = Mathf.Clamp(offset.z, -flightBounds.z, flightBounds.z);
+        transform.position = dockPosition + offset;
+
+        if (visualRig != null)
         {
-            if (system == null) return;
-            ParticleSystem.EmissionModule emission = system.emission;
-            emission.enabled = enabled;
+            Quaternion bank = Quaternion.Euler(forward * 7f, 0f, -strafe * 10f);
+            visualRig.localRotation = Quaternion.Slerp(visualRig.localRotation, bank, Time.deltaTime * 5f);
+        }
+    }
+
+    // Converts the Animator's current state into a simpler gameplay mode.
+    private void UpdateMode()
+    {
+        AnimatorStateInfo state = animator.GetCurrentAnimatorStateInfo(0);
+        if (state.IsName("Docked")) CurrentMode = DroneMode.Docked;
+        else if (state.IsName("Launching")) CurrentMode = DroneMode.Launching;
+        else if (state.IsName("Docking")) CurrentMode = DroneMode.Docking;
+        else if (state.IsName("Scanning")) CurrentMode = DroneMode.Scanning;
+        else if (state.IsName("Emergency")) CurrentMode = DroneMode.Emergency;
+        else CurrentMode = DroneMode.Flight;
+    }
+
+    // Turns thrusters on and off and keeps the scan light disabled outside the scan state.
+    private void UpdateEffects()
+    {
+        bool thrustersOn = deployed && !emergency;
+
+        if (leftThruster != null)
+        {
+            ParticleSystem.EmissionModule emission = leftThruster.emission;
+            emission.enabled = thrustersOn;
+        }
+
+        if (rightThruster != null)
+        {
+            ParticleSystem.EmissionModule emission = rightThruster.emission;
+            emission.enabled = thrustersOn;
+        }
+
+        if (scanLight != null && CurrentMode != DroneMode.Scanning)
+        {
+            scanLight.enabled = false;
         }
     }
 }
